@@ -11,17 +11,50 @@ that encircle a pole cannot be represented in this model and are rejected.
 
 from __future__ import annotations
 
-from typing import Iterable, Iterator
+import enum
+import math
+from typing import Iterable, Iterator, Union
 
 from . import geodesy
 from .bbox import BoundingBox
-from .coords import Coordinate, CoordinateLike, as_coordinates, normalize_lon
+from .coords import (
+    Coordinate,
+    CoordinateLike,
+    as_coordinate,
+    as_coordinates,
+    normalize_lon,
+)
 from .errors import InvalidGeometryError
+
+#: Points closer than this many degrees to an edge count as on the boundary.
+BOUNDARY_TOLERANCE_DEG = 1e-12
+
+
+class Location(enum.Enum):
+    """Where a point lies relative to a shape."""
+
+    INSIDE = "inside"
+    BOUNDARY = "boundary"
+    OUTSIDE = "outside"
 
 
 def _wrap_lon(lon: float) -> float:
     """Wrap into ``[-180, 180]`` while leaving in-range values (incl. 180) alone."""
     return lon if -180.0 <= lon <= 180.0 else normalize_lon(lon)
+
+
+def _on_segment(
+    px: float, py: float, ax: float, ay: float, bx: float, by: float
+) -> bool:
+    """True when (px, py) lies on the closed segment a-b, within tolerance."""
+    tol = BOUNDARY_TOLERANCE_DEG
+    cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+    if abs(cross) > tol * max(1.0, math.hypot(bx - ax, by - ay)):
+        return False
+    return (
+        min(ax, bx) - tol <= px <= max(ax, bx) + tol
+        and min(ay, by) - tol <= py <= max(ay, by) + tol
+    )
 
 
 class Ring:
@@ -63,21 +96,24 @@ class Ring:
 
     @staticmethod
     def _unwrap_longitudes(coords: tuple[Coordinate, ...]) -> tuple[float, ...]:
-        """Longitudes made continuous by letting each edge run the short way."""
+        """Longitudes made continuous by letting each edge run the short way.
 
-        def step(a: float, b: float) -> float:
-            delta = b - a
-            if delta > 180.0:
-                delta -= 360.0
-            elif delta < -180.0:
-                delta += 360.0
-            return delta
-
+        Every value is the original longitude plus a whole number of turns,
+        so a query longitude shifted by the same number of turns compares
+        exactly with the stored vertices.
+        """
+        turns = 0
         xs = [coords[0].lon]
-        for previous, current in zip(coords, coords[1:]):
-            xs.append(xs[-1] + step(previous.lon, current.lon))
-        closing = xs[-1] + step(coords[-1].lon, coords[0].lon)
-        if abs(closing - xs[0]) > 1e-9:
+        n = len(coords)
+        for i in range(1, n + 1):
+            delta = coords[i % n].lon - coords[i - 1].lon
+            if delta > 180.0:
+                turns -= 1
+            elif delta < -180.0:
+                turns += 1
+            if i < n:
+                xs.append(coords[i].lon + 360.0 * turns)
+        if turns != 0:
             raise InvalidGeometryError(
                 "ring encircles a pole, which the lon/lat edge model cannot represent"
             )
@@ -152,3 +188,125 @@ class Ring:
     def perimeter(self) -> float:
         """Length of the boundary in metres (great-circle length per edge)."""
         return sum(geodesy.haversine_distance(a, b) for a, b in self.edges())
+
+    # -- point location ---------------------------------------------------
+
+    def _locate_planar(self, px: float, py: float) -> Location:
+        """Even-odd ray casting in unwrapped lon/lat space."""
+        xs, ys = self._xs, self._ys
+        n = len(xs)
+        inside = False
+        for i in range(n):
+            j = (i + 1) % n
+            ax, ay, bx, by = xs[i], ys[i], xs[j], ys[j]
+            if _on_segment(px, py, ax, ay, bx, by):
+                return Location.BOUNDARY
+            # Half-open rule: an edge counts when it spans the ray's latitude
+            # with exactly one end strictly above it, so a vertex on the ray
+            # is never counted twice.
+            if (ay > py) != (by > py):
+                x_cross = ax + (py - ay) * (bx - ax) / (by - ay)
+                if x_cross > px:
+                    inside = not inside
+        return Location.INSIDE if inside else Location.OUTSIDE
+
+    def locate(self, point: CoordinateLike) -> Location:
+        """Classify a point as inside, on the boundary of, or outside the ring."""
+        c = as_coordinate(point)
+        if not min(self._ys) <= c.lat <= max(self._ys):
+            return Location.OUTSIDE
+        west, east = min(self._xs), max(self._xs)
+        result = Location.OUTSIDE
+        # The unwrapped ring may sit one turn east or west of the input range.
+        for turn in (-360.0, 0.0, 360.0):
+            x = c.lon + turn
+            if not west <= x <= east:
+                continue
+            found = self._locate_planar(x, c.lat)
+            if found is Location.BOUNDARY:
+                return found
+            if found is Location.INSIDE:
+                result = found
+        return result
+
+    def contains(self, point: CoordinateLike, boundary: bool = True) -> bool:
+        """True when the point is inside the ring.
+
+        Points on the boundary count as inside unless ``boundary=False``.
+        """
+        location = self.locate(point)
+        if location is Location.BOUNDARY:
+            return boundary
+        return location is Location.INSIDE
+
+
+RingLike = Union[Ring, Iterable[CoordinateLike]]
+
+
+def _as_ring(value: RingLike) -> Ring:
+    return value if isinstance(value, Ring) else Ring(value)
+
+
+class Polygon:
+    """An exterior ring with zero or more holes.
+
+    A point inside a hole is outside the polygon; a point on the edge of a
+    hole is on the polygon's boundary.  Construction does not check that the
+    holes lie inside the exterior; see the validity helpers for that.
+    """
+
+    __slots__ = ("_exterior", "_holes")
+
+    def __init__(self, exterior: RingLike, holes: Iterable[RingLike] = ()) -> None:
+        self._exterior = _as_ring(exterior)
+        self._holes = tuple(_as_ring(hole) for hole in holes)
+
+    @property
+    def exterior(self) -> Ring:
+        return self._exterior
+
+    @property
+    def holes(self) -> tuple[Ring, ...]:
+        return self._holes
+
+    @property
+    def rings(self) -> tuple[Ring, ...]:
+        """Exterior first, then the holes."""
+        return (self._exterior, *self._holes)
+
+    @property
+    def bbox(self) -> BoundingBox:
+        return self._exterior.bbox
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Polygon) and self.rings == other.rings
+
+    def __hash__(self) -> int:
+        return hash(self.rings)
+
+    def __repr__(self) -> str:
+        return f"Polygon(exterior={self._exterior!r}, holes={list(self._holes)!r})"
+
+    def locate(self, point: CoordinateLike) -> Location:
+        c = as_coordinate(point)
+        outer = self._exterior.locate(c)
+        if outer is not Location.INSIDE:
+            return outer
+        for hole in self._holes:
+            inner = hole.locate(c)
+            if inner is Location.BOUNDARY:
+                return Location.BOUNDARY
+            if inner is Location.INSIDE:
+                return Location.OUTSIDE
+        return Location.INSIDE
+
+    def contains(self, point: CoordinateLike, boundary: bool = True) -> bool:
+        """True when the point is inside the polygon and not in a hole.
+
+        Points on the exterior ring or on the edge of a hole count as inside
+        unless ``boundary=False``.
+        """
+        location = self.locate(point)
+        if location is Location.BOUNDARY:
+            return boundary
+        return location is Location.INSIDE
