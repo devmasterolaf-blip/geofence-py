@@ -1,0 +1,13 @@
+# virtualenv and tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# build output
+build/
+dist/
+*.egg-info/
+
+# local scratch space
+_scratch/
