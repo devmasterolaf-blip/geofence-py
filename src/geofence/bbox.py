@@ -133,10 +133,17 @@ class BoundingBox:
         """True when ``other`` lies completely inside this box."""
         if other.south < self.south or other.north > self.north:
             return False
-        if self.width_deg >= 360.0:
+        width = self.width_deg
+        if width >= 360.0:
             return True
-        offset = (other.west - self.west) % 360.0
-        return offset + other.width_deg <= self.width_deg
+        if other.width_deg >= 360.0:
+            return False
+        # Compare where the other box's edges fall inside our span instead of
+        # adding widths: a shared edge then yields bit-identical offsets, so
+        # a box always contains the boxes it was built from.
+        west_offset = (other.west - self.west) % 360.0
+        east_offset = (other.east - self.west) % 360.0
+        return west_offset <= east_offset <= width
 
     def intersects(self, other: "BoundingBox") -> bool:
         """True when the boxes share at least one point (touching counts)."""

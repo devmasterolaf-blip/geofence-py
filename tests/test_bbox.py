@@ -1,9 +1,10 @@
 import math
+import random
 
 import pytest
 
 from geofence.bbox import BoundingBox
-from geofence.coords import Coordinate
+from geofence.coords import Coordinate, normalize_lon
 from geofence.errors import InvalidGeometryError, ValidationError
 
 
@@ -176,3 +177,48 @@ def test_split_at_antimeridian():
     assert plain.split() == [plain]
     parts = BoundingBox(-10, 170, 10, -170).split()
     assert parts == [BoundingBox(-10, 170, 10, 180), BoundingBox(-10, -180, 10, -170)]
+
+
+class TestUnionContainsItsInputs:
+    """Regression: contains_box used to add widths and lose the last bit."""
+
+    def test_pair_that_failed_by_one_rounding_step(self):
+        a = BoundingBox(-27.748639106883708, -176.73178074496977, -4.607885944608725, -167.38635700518145)
+        b = BoundingBox(-59.24368704832187, -109.25219861531706, -21.03649106467521, 41.895083874946465)
+        union = a.union(b)
+        assert union.contains_box(a)
+        assert union.contains_box(b)
+
+    def test_random_pairs(self):
+        rnd = random.Random(5)
+
+        def random_box():
+            south = rnd.uniform(-90, 80)
+            north = rnd.uniform(south, min(90, south + 40))
+            west = rnd.uniform(-180, 180)
+            east = normalize_lon(west + rnd.uniform(0, 200))
+            return BoundingBox(south, west, north, east)
+
+        for _ in range(2000):
+            a, b = random_box(), random_box()
+            union = a.union(b)
+            assert union.contains_box(a), (a, b)
+            assert union.contains_box(b), (a, b)
+            assert union.contains_box(union)
+
+    def test_box_wrapping_around_the_outside_is_not_contained(self):
+        # 350 degrees wide: everything except the 10 degrees from -10 to 0.
+        outer = BoundingBox(-10, 0, 10, -10)
+        assert not outer.contains_box(BoundingBox(-5, -20, 5, 20))
+        assert not outer.contains_box(BoundingBox(-5, 10, 5, 5))
+        assert outer.contains_box(BoundingBox(-5, 10, 5, -20))
+
+    def test_degenerate_boxes_on_the_edges(self):
+        outer = BoundingBox(-10, 170, 10, -170)
+        assert outer.contains_box(BoundingBox(0, 170, 0, 170))
+        assert outer.contains_box(BoundingBox(0, -170, 0, -170))
+        assert not outer.contains_box(BoundingBox(0, -169, 0, -169))
+
+    def test_world_is_only_contained_by_world(self):
+        assert not BoundingBox(-90, -180, 90, 179).contains_box(BoundingBox.world())
+        assert BoundingBox.world().contains_box(BoundingBox.world())
