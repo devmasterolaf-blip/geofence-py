@@ -108,3 +108,10 @@ class TestPolygonBoundaryDistance:
         multi = MultiPolygon([self.SQUARE, [(0, 10), (0, 12), (2, 12), (2, 10)]])
         assert multi.boundary_distance((1, 9)) == pytest.approx(self.ONE_DEG, rel=1e-3)
         assert multi.boundary_distance((1, 3.5)) == pytest.approx(1.5 * self.ONE_DEG, rel=1e-3)
+
+
+def test_huge_integer_radius_is_a_geometry_error():
+    with pytest.raises(InvalidGeometryError, match="covers the whole sphere"):
+        Circle((0, 0), 10**400)
+    with pytest.raises(InvalidGeometryError, match="positive and finite"):
+        Circle((0, 0), -(10**400))

@@ -104,3 +104,16 @@ class TestCoercion:
     def test_rejects_other_shapes(self, bad):
         with pytest.raises(InvalidCoordinateError):
             as_coordinate(bad)
+
+
+class TestHugeIntegers:
+    """Integers too large for a float must fail like any other out-of-range value."""
+
+    @pytest.mark.parametrize("lat, lon", [(10**400, 0), (0, 10**400), (-(10**400), 0), (0, -(10**400))])
+    def test_out_of_range_error_instead_of_overflow(self, lat, lon):
+        with pytest.raises(InvalidCoordinateError, match="outside the range"):
+            Coordinate(lat, lon)
+
+    def test_from_lonlat(self):
+        with pytest.raises(InvalidCoordinateError, match="longitude"):
+            Coordinate.from_lonlat(10**400, 0)

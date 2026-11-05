@@ -404,3 +404,24 @@ class TestStrictLoading:
         assert len(geojson.read_fences(path)) == 1
         with pytest.raises(GeoJsonParseError):
             geojson.read_fences(path, strict=True)
+
+
+class TestHugeNumbers:
+    """JSON integers have no size limit; they must not escape as OverflowError."""
+
+    def test_position_with_huge_integer(self):
+        with pytest.raises(GeoJsonParseError) as info:
+            geojson.parse_geometry(geojson.loads('{"type": "Point", "coordinates": [1' + "0" * 400 + ", 0]}"))
+        assert info.value.path == "$.coordinates"
+        assert "longitude" in str(info.value)
+
+    def test_ring_vertex_with_huge_integer(self):
+        ring = [[0, 0], [1, 0], [1, 10**400], [0, 0]]
+        with pytest.raises(GeoJsonParseError) as info:
+            geojson.parse_geometry(polygon_geometry(ring))
+        assert info.value.path == "$.coordinates[0][2]"
+
+    def test_radius_with_huge_integer(self):
+        error = error_for(feature({"type": "Point", "coordinates": [0, 0]}, radius_m=10**400))
+        assert error.path == "$.properties.radius_m"
+        assert "covers the whole sphere" in str(error)

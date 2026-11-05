@@ -24,7 +24,8 @@ class Circle:
         self._center = as_coordinate(center)
         if isinstance(radius_m, bool) or not isinstance(radius_m, (int, float)):
             raise InvalidGeometryError(f"circle radius must be a real number, got {radius_m!r}")
-        if not math.isfinite(radius_m) or radius_m <= 0:
+        not_finite = isinstance(radius_m, float) and not math.isfinite(radius_m)
+        if not_finite or radius_m <= 0:
             raise InvalidGeometryError(f"circle radius must be positive and finite, got {radius_m!r}")
         if radius_m >= math.pi * EARTH_RADIUS_M:
             raise InvalidGeometryError(

@@ -31,7 +31,9 @@ def normalize_lon(lon: float) -> float:
 def _check_degrees(name: str, value: object, limit: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidCoordinateError(f"{name} must be a real number, got {value!r}")
-    if not math.isfinite(value):
+    # Only floats can be non-finite; math.isfinite() overflows on huge ints,
+    # which the range comparison below handles exactly.
+    if isinstance(value, float) and not math.isfinite(value):
         raise InvalidCoordinateError(f"{name} must be finite, got {value!r}")
     if not -limit <= value <= limit:
         raise InvalidCoordinateError(
