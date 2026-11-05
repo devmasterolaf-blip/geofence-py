@@ -351,3 +351,56 @@ class TestFenceSerialisation:
         with pytest.raises(GeoJsonParseError) as info:
             geojson.read_fences(path)
         assert info.value.path == "$.features[0]"
+
+
+class TestStrictLoading:
+    BOW_TIE = [[0, 0], [2, 2], [2, 0], [0, 2], [0, 0]]
+    OUTSIDE_HOLE = [[5, 5], [5, 6], [6, 6], [6, 5], [5, 5]]
+
+    def test_invalid_polygons_load_by_default(self):
+        (fence,) = geojson.parse_fences(feature(polygon_geometry(self.BOW_TIE), fid="x"))
+        assert fence.id == "x"
+
+    def test_strict_rejects_self_intersection(self):
+        with pytest.raises(GeoJsonParseError) as info:
+            geojson.parse_fences(
+                collection(
+                    feature(polygon_geometry(SQUARE), fid="ok"),
+                    feature(polygon_geometry(self.BOW_TIE), fid="x"),
+                ),
+                strict=True,
+            )
+        assert info.value.path == "$.features[1].geometry"
+        assert "invalid fence geometry: self-intersection" in str(info.value)
+
+    def test_strict_lists_every_issue(self):
+        with pytest.raises(GeoJsonParseError) as info:
+            geojson.parse_fences(
+                feature(polygon_geometry(self.BOW_TIE, self.OUTSIDE_HOLE), fid="x"), strict=True
+            )
+        message = str(info.value)
+        assert "self-intersection" in message and "hole-outside-exterior" in message
+
+    def test_strict_checks_multipolygon_members(self):
+        obj = feature({"type": "MultiPolygon", "coordinates": [[SQUARE], [self.BOW_TIE]]}, fid="m")
+        with pytest.raises(GeoJsonParseError, match="polygon 2"):
+            geojson.parse_fences(obj, strict=True)
+
+    def test_strict_accepts_valid_fences_and_circles(self):
+        fences = geojson.load_fences(
+            json.dumps(
+                collection(
+                    feature(polygon_geometry(SQUARE, HOLE), fid="a"),
+                    feature({"type": "Point", "coordinates": [0, 0]}, fid="c", radius_m=5),
+                )
+            ),
+            strict=True,
+        )
+        assert [f.id for f in fences] == ["a", "c"]
+
+    def test_read_fences_passes_strict_through(self, tmp_path):
+        path = tmp_path / "f.geojson"
+        path.write_text(json.dumps(feature(polygon_geometry(self.BOW_TIE), fid="x")))
+        assert len(geojson.read_fences(path)) == 1
+        with pytest.raises(GeoJsonParseError):
+            geojson.read_fences(path, strict=True)

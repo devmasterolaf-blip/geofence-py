@@ -127,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not count points exactly on a fence boundary",
     )
+    _add_strict_option(p)
     p.set_defaults(handler=_cmd_contains)
 
     p = commands.add_parser(
@@ -176,8 +177,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sort", action="store_true", help="sort the track by time before replaying it")
     p.add_argument("--format", choices=("text", "json"), default="text",
                    help="tab-separated text or one JSON object per line")
+    _add_strict_option(p)
     p.set_defaults(handler=_cmd_events)
     return parser
+
+
+def _add_strict_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="reject fences whose polygons are invalid (self-intersecting, misplaced holes, ...)",
+    )
 
 
 def _cmd_distance(args: argparse.Namespace) -> int:
@@ -192,7 +202,7 @@ def _cmd_distance(args: argparse.Namespace) -> int:
 
 
 def _cmd_contains(args: argparse.Namespace) -> int:
-    index = FenceIndex(geojson.read_fences(args.fences))
+    index = FenceIndex(geojson.read_fences(args.fences, strict=args.strict))
     matches = index.containing(args.point, boundary=not args.exclude_boundary)
     for fence in matches:
         print(f"{fence.id}\t{fence.name}")
@@ -270,7 +280,7 @@ def _format_event(event: Event) -> str:
 
 
 def _cmd_events(args: argparse.Namespace) -> int:
-    fences = geojson.read_fences(args.fences)
+    fences = geojson.read_fences(args.fences, strict=args.strict)
     track = read_track(args.track)
     if args.sort:
         track = sort_track(track)

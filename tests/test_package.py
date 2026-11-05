@@ -9,7 +9,7 @@ def test_version_is_semver_like():
     assert re.fullmatch(r"\d+\.\d+\.\d+", geofence.__version__)
 
 
-def test_all_names_resolve_and_are_sorted_uniquely():
+def test_all_names_resolve_and_are_unique():
     assert len(set(geofence.__all__)) == len(geofence.__all__)
     for name in geofence.__all__:
         assert hasattr(geofence, name), name

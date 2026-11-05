@@ -176,6 +176,24 @@ class TestContains:
         assert code == EXIT_DATA
         assert err.startswith("geofence: error: $.features[0].geometry: ")
 
+    def test_strict_rejects_invalid_polygons(self, capsys, tmp_path):
+        bow_tie = {
+            "type": "Feature",
+            "id": "tie",
+            "properties": {},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[0, 0], [2, 2], [2, 0], [0, 2], [0, 0]]],
+            },
+        }
+        path = tmp_path / "tie.geojson"
+        path.write_text(json.dumps(bow_tie))
+        assert run(capsys, "contains", str(path), "0.5,1.5")[0] == EXIT_OK
+        code, out, err = run(capsys, "contains", str(path), "0.5,1.5", "--strict")
+        assert code == EXIT_DATA
+        assert out == ""
+        assert "$.geometry: invalid fence geometry: self-intersection" in err
+
     def test_non_utf8_file(self, capsys, tmp_path):
         path = tmp_path / "latin.geojson"
         path.write_bytes(b'{"name": "caf\xe9"}')
@@ -385,6 +403,11 @@ class TestEvents:
         assert code == EXIT_DATA
         assert out == ""
         assert err == "geofence: error: line 3: latitude is not a number: 'north'\n"
+
+    def test_strict_accepts_valid_fences(self, capsys, fences_file, track_file):
+        code, out, _ = run(capsys, "events", fences_file, track_file, "--strict")
+        assert code == EXIT_OK
+        assert len(out.splitlines()) == 4
 
     def test_missing_track_file(self, capsys, fences_file, tmp_path):
         code, _, err = run(capsys, "events", fences_file, str(tmp_path / "gone.csv"))

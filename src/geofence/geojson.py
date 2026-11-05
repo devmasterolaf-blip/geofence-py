@@ -26,6 +26,7 @@ from .errors import GeoJsonParseError, GeofenceError, InvalidCoordinateError
 from .fence import Fence
 from .polygon import MultiPolygon, Polygon, Ring
 from .polyline import LineString
+from .validity import issues as validity_issues
 
 Geometry = Union[Coordinate, LineString, Polygon, MultiPolygon]
 
@@ -188,7 +189,7 @@ def _feature_id(feature: dict, properties: dict, index: int, path: str) -> str:
     return f"fence-{index + 1}"
 
 
-def _fence_from_feature(obj: Any, index: int, path: str) -> Fence:
+def _fence_from_feature(obj: Any, index: int, path: str, strict: bool) -> Fence:
     feature = _require_object(obj, path)
     if feature.get("type") != "Feature":
         raise GeoJsonParseError(
@@ -223,6 +224,13 @@ def _fence_from_feature(obj: Any, index: int, path: str) -> Fence:
             raise GeoJsonParseError(str(exc), radius_path) from None
     elif isinstance(geometry, (Polygon, MultiPolygon)):
         shape = geometry
+        if strict:
+            problems = validity_issues(shape)
+            if problems:
+                raise GeoJsonParseError(
+                    "invalid fence geometry: " + "; ".join(str(issue) for issue in problems),
+                    f"{path}.geometry",
+                )
     else:
         raise GeoJsonParseError(
             "a LineString cannot be used as a fence", f"{path}.geometry.type"
@@ -230,17 +238,22 @@ def _fence_from_feature(obj: Any, index: int, path: str) -> Fence:
     return Fence(fence_id, shape, name=name or None, properties=properties)
 
 
-def parse_fences(obj: Any) -> list[Fence]:
+def parse_fences(obj: Any, strict: bool = False) -> list[Fence]:
     """Build fences from a decoded ``FeatureCollection`` or single ``Feature``.
 
     The fence id comes from the feature's ``id`` member, else from an ``id``
     property, else it is ``fence-N`` with N the one-based feature position.
     Ids must be unique within the collection.
+
+    With ``strict=True`` polygon fences must also pass the checks in
+    :mod:`geofence.validity` (no self-intersection, holes inside the
+    exterior, ...); by default such shapes load and behave by the even-odd
+    rule.
     """
     root = _require_object(obj, "$")
     kind = root.get("type")
     if kind == "Feature":
-        return [_fence_from_feature(root, 0, "$")]
+        return [_fence_from_feature(root, 0, "$", strict)]
     if kind != "FeatureCollection":
         raise GeoJsonParseError(
             f"expected a FeatureCollection or Feature, got type {kind!r}", "$.type"
@@ -252,7 +265,7 @@ def parse_fences(obj: Any) -> list[Fence]:
     seen: set[str] = set()
     for index, feature in enumerate(features):
         path = f"$.features[{index}]"
-        fence = _fence_from_feature(feature, index, path)
+        fence = _fence_from_feature(feature, index, path, strict)
         if fence.id in seen:
             raise GeoJsonParseError(f"duplicate fence id {fence.id!r}", path)
         seen.add(fence.id)
@@ -260,15 +273,15 @@ def parse_fences(obj: Any) -> list[Fence]:
     return fences
 
 
-def load_fences(text: str) -> list[Fence]:
+def load_fences(text: str, strict: bool = False) -> list[Fence]:
     """Parse GeoJSON text into fences (see :func:`parse_fences`)."""
-    return parse_fences(loads(text))
+    return parse_fences(loads(text), strict=strict)
 
 
-def read_fences(path: Union[str, os.PathLike]) -> list[Fence]:
+def read_fences(path: Union[str, os.PathLike], strict: bool = False) -> list[Fence]:
     """Read fences from a UTF-8 GeoJSON file."""
     with open(path, encoding="utf-8") as handle:
-        return load_fences(handle.read())
+        return load_fences(handle.read(), strict=strict)
 
 
 def fences_to_dict(fences: Iterable[Fence]) -> dict[str, Any]:
