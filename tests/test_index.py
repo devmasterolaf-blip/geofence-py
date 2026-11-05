@@ -181,3 +181,76 @@ class TestFenceIndex:
             "b-square",
         ]
         assert index.intersecting(BoundingBox(30, 30, 31, 31)) == []
+
+
+class TestNearest:
+    def make(self):
+        return FenceIndex(
+            [
+                Fence("near", square(0, 0, 0.1)),
+                Fence("mid", square(0, 1, 0.1)),
+                Fence("far", square(0, 30, 0.1)),
+                Fence("other-side", square(0, -179.9, 0.1)),
+            ],
+            cell_size_deg=0.5,
+        )
+
+    def test_nearest_one(self):
+        index = self.make()
+        [(fence, distance)] = index.nearest((0.05, 0.3))
+        assert fence.id == "near"
+        assert distance == pytest.approx(index.get("near").distance_to((0.05, 0.3)))
+        assert distance > 0
+
+    def test_inside_fence_has_zero_distance(self):
+        [(fence, distance)] = self.make().nearest((0.05, 0.05))
+        assert (fence.id, distance) == ("near", 0.0)
+
+    def test_k_results_are_sorted_by_distance(self):
+        result = self.make().nearest((0.05, 0.3), k=3)
+        assert [fence.id for fence, _ in result] == ["near", "mid", "far"]
+        distances = [distance for _, distance in result]
+        assert distances == sorted(distances)
+
+    def test_k_larger_than_index(self):
+        assert len(self.make().nearest((0, 0), k=50)) == 4
+
+    def test_far_away_query_still_finds_something(self):
+        [(fence, _)] = self.make().nearest((-60, 100))
+        assert fence.id in {"far", "other-side"}
+
+    def test_search_wraps_across_the_antimeridian(self):
+        [(fence, distance)] = self.make().nearest((0.05, 179.5))
+        assert fence.id == "other-side"
+        assert distance < 80_000
+
+    def test_max_distance_filters(self):
+        index = self.make()
+        assert index.nearest((0.05, 0.3), k=3, max_distance_m=1000) == []
+        within = index.nearest((0.05, 0.3), k=3, max_distance_m=100_000)
+        assert [fence.id for fence, _ in within] == ["near", "mid"]
+
+    def test_ties_break_by_id(self):
+        index = FenceIndex([Fence("b", square(0, 0)), Fence("a", square(0, 0))])
+        assert [fence.id for fence, _ in index.nearest((0.5, 0.5), k=2)] == ["a", "b"]
+
+    def test_empty_index(self):
+        assert FenceIndex().nearest((0, 0)) == []
+
+    @pytest.mark.parametrize("kwargs", [{"k": 0}, {"k": 1.5}, {"max_distance_m": -1}, {"max_distance_m": "far"}])
+    def test_bad_arguments(self, kwargs):
+        with pytest.raises(ValidationError):
+            self.make().nearest((0, 0), **kwargs)
+
+    def test_matches_brute_force(self):
+        rng = random.Random(11)
+        fences = [
+            Fence(f"f{i:03d}", Circle((rng.uniform(-60, 60), rng.uniform(-180, 180)), rng.uniform(500, 50_000)))
+            for i in range(120)
+        ]
+        index = FenceIndex(fences, cell_size_deg=1.0)
+        for _ in range(40):
+            point = (rng.uniform(-70, 70), rng.uniform(-180, 180))
+            expected = sorted((fence.distance_to(point), fence.id) for fence in fences)[:3]
+            got = [(distance, fence.id) for fence, distance in index.nearest(point, k=3)]
+            assert got == expected

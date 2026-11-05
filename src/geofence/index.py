@@ -11,7 +11,7 @@ import math
 from typing import Hashable, Iterable, Iterator
 
 from .bbox import BoundingBox
-from .coords import CoordinateLike, as_coordinate
+from .coords import EARTH_RADIUS_M, CoordinateLike, as_coordinate
 from .errors import DuplicateFenceError, UnknownFenceError, ValidationError
 from .fence import Fence
 
@@ -187,3 +187,55 @@ class FenceIndex:
             (self._fences[key] for key in self._grid.query_box(box)),
             key=lambda fence: fence.id,
         )
+
+    def nearest(
+        self,
+        point: CoordinateLike,
+        k: int = 1,
+        max_distance_m: float | None = None,
+    ) -> list[tuple[Fence, float]]:
+        """The ``k`` fences closest to the point, as ``(fence, metres)`` pairs.
+
+        A fence that contains the point is at distance ``0.0``.  Results are
+        ordered by distance, then by id.  With ``max_distance_m`` set, fences
+        farther away than that are left out, so fewer than ``k`` pairs may
+        come back.
+
+        The search looks at fences whose bounding box lies within a radius
+        that doubles until enough fences have been found, so far-away fences
+        are never measured when close ones exist.
+        """
+        c = as_coordinate(point)
+        if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+            raise ValidationError(f"k must be a positive integer, got {k!r}")
+        limit = math.pi * EARTH_RADIUS_M
+        if max_distance_m is not None:
+            if (
+                isinstance(max_distance_m, bool)
+                or not isinstance(max_distance_m, (int, float))
+                or math.isnan(max_distance_m)
+                or max_distance_m < 0
+            ):
+                raise ValidationError(
+                    f"max_distance_m must be a non-negative number, got {max_distance_m!r}"
+                )
+            limit = min(limit, float(max_distance_m))
+        if not self._fences:
+            return []
+
+        here = BoundingBox(c.lat, c.lon, c.lat, c.lon)
+        distances: dict[str, float] = {}
+        radius = math.radians(self._grid.cell_size_deg) * EARTH_RADIUS_M
+        while True:
+            radius = min(radius, limit)
+            for key in self._grid.query_box(here.expand(radius)):
+                if key not in distances:
+                    distances[key] = self._fences[key].distance_to(c)
+            # Only fences within the search radius are certain: a closer one
+            # could still be hiding outside the box that was searched.
+            certain = sorted(
+                (distance, key) for key, distance in distances.items() if distance <= radius
+            )
+            if len(certain) >= k or radius >= limit:
+                return [(self._fences[key], distance) for distance, key in certain[:k]]
+            radius *= 2.0
