@@ -1,0 +1,22 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "depot",
+      "properties": {"name": "Main depot"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [[11.000, 48.000], [11.010, 48.000], [11.010, 48.010], [11.000, 48.010], [11.000, 48.000]]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "gate",
+      "properties": {"name": "East gate", "radius_m": 150},
+      "geometry": {"type": "Point", "coordinates": [11.020, 48.005]}
+    }
+  ]
+}
