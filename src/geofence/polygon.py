@@ -18,6 +18,7 @@ from typing import Iterable, Iterator, Union
 from . import geodesy
 from .bbox import BoundingBox
 from .coords import (
+    EARTH_RADIUS_M,
     Coordinate,
     CoordinateLike,
     as_coordinate,
@@ -189,6 +190,51 @@ class Ring:
         """Length of the boundary in metres (great-circle length per edge)."""
         return sum(geodesy.haversine_distance(a, b) for a, b in self.edges())
 
+    def signed_area(self) -> float:
+        """Area on the sphere in square metres; positive when counter-clockwise.
+
+        Uses the line-integral formula of Chamberlain and Duquette.  It is
+        exact for edges along meridians and parallels and a close
+        approximation for the small and medium shapes typical of geofences.
+        """
+        xs, ys = self._xs, self._ys
+        n = len(xs)
+        total = 0.0
+        for i in range(n):
+            j = (i + 1) % n
+            total += math.radians(xs[j] - xs[i]) * (
+                2.0 + math.sin(math.radians(ys[i])) + math.sin(math.radians(ys[j]))
+            )
+        return -total * EARTH_RADIUS_M * EARTH_RADIUS_M / 2.0
+
+    def area(self) -> float:
+        """Enclosed area on the sphere in square metres (never negative)."""
+        return abs(self.signed_area())
+
+    def _planar_centroid(self) -> tuple[float, float, float]:
+        """Centroid ``(x, y)`` in unwrapped degrees and the absolute planar area."""
+        xs, ys = self._xs, self._ys
+        n = len(xs)
+        area = self.planar_signed_area()
+        if abs(area) < 1e-18:
+            return sum(xs) / n, sum(ys) / n, 0.0
+        cx = cy = 0.0
+        for i in range(n):
+            j = (i + 1) % n
+            cross = xs[i] * ys[j] - xs[j] * ys[i]
+            cx += (xs[i] + xs[j]) * cross
+            cy += (ys[i] + ys[j]) * cross
+        return cx / (6.0 * area), cy / (6.0 * area), abs(area)
+
+    def centroid(self) -> Coordinate:
+        """Centroid of the enclosed area, computed in lon/lat space.
+
+        A ring with no area (all vertices on one line) yields the mean of
+        its vertices.
+        """
+        x, y, _ = self._planar_centroid()
+        return Coordinate(y, _wrap_lon(x))
+
     # -- point location ---------------------------------------------------
 
     def _locate_planar(self, px: float, py: float) -> Location:
@@ -238,6 +284,22 @@ class Ring:
         if location is Location.BOUNDARY:
             return boundary
         return location is Location.INSIDE
+
+
+def _align_turn(x: float, reference: float) -> float:
+    """Shift ``x`` by whole turns so that it lies within 180 degrees of ``reference``."""
+    return x - 360.0 * round((x - reference) / 360.0)
+
+
+def _combine_centroids(parts: list[tuple[float, float, float]]) -> tuple[float, float, float]:
+    """Weighted mean of ``(x, y, weight)`` parts; weights may be negative."""
+    reference = parts[0][0]
+    total = sum(weight for _, _, weight in parts)
+    if abs(total) < 1e-18:
+        return parts[0][0], parts[0][1], 0.0
+    x = sum(_align_turn(px, reference) * weight for px, _, weight in parts) / total
+    y = sum(py * weight for _, py, weight in parts) / total
+    return x, y, total
 
 
 RingLike = Union[Ring, Iterable[CoordinateLike]]
@@ -310,3 +372,111 @@ class Polygon:
         if location is Location.BOUNDARY:
             return boundary
         return location is Location.INSIDE
+
+    def area(self) -> float:
+        """Area on the sphere in square metres, holes subtracted."""
+        return max(0.0, self._exterior.area() - sum(hole.area() for hole in self._holes))
+
+    def perimeter(self) -> float:
+        """Total boundary length in metres, including the edges of holes."""
+        return sum(ring.perimeter() for ring in self.rings)
+
+    def _planar_centroid(self) -> tuple[float, float, float]:
+        parts = [self._exterior._planar_centroid()]
+        for hole in self._holes:
+            x, y, weight = hole._planar_centroid()
+            parts.append((x, y, -weight))
+        return _combine_centroids(parts)
+
+    def centroid(self) -> Coordinate:
+        """Centroid in lon/lat space, with holes weighted negatively.
+
+        The centroid of a concave polygon, or of one with a hole, may lie
+        outside the polygon.
+        """
+        x, y, _ = self._planar_centroid()
+        return Coordinate(y, _wrap_lon(x))
+
+    def normalized(self) -> "Polygon":
+        """Copy with a counter-clockwise exterior and clockwise holes."""
+        return Polygon(
+            self._exterior.oriented(ccw=True),
+            [hole.oriented(ccw=False) for hole in self._holes],
+        )
+
+
+PolygonLike = Union[Polygon, Ring, Iterable[CoordinateLike]]
+
+
+def _as_polygon(value: PolygonLike) -> Polygon:
+    return value if isinstance(value, Polygon) else Polygon(value)
+
+
+class MultiPolygon:
+    """A collection of one or more polygons treated as a single shape."""
+
+    __slots__ = ("_polygons",)
+
+    def __init__(self, polygons: Iterable[PolygonLike]) -> None:
+        self._polygons = tuple(_as_polygon(polygon) for polygon in polygons)
+        if not self._polygons:
+            raise InvalidGeometryError("a multipolygon needs at least one polygon")
+
+    @property
+    def polygons(self) -> tuple[Polygon, ...]:
+        return self._polygons
+
+    def __len__(self) -> int:
+        return len(self._polygons)
+
+    def __iter__(self) -> Iterator[Polygon]:
+        return iter(self._polygons)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, MultiPolygon) and self._polygons == other._polygons
+
+    def __hash__(self) -> int:
+        return hash(self._polygons)
+
+    def __repr__(self) -> str:
+        return f"MultiPolygon({list(self._polygons)!r})"
+
+    @property
+    def bbox(self) -> BoundingBox:
+        box = self._polygons[0].bbox
+        for polygon in self._polygons[1:]:
+            box = box.union(polygon.bbox)
+        return box
+
+    def locate(self, point: CoordinateLike) -> Location:
+        c = as_coordinate(point)
+        result = Location.OUTSIDE
+        for polygon in self._polygons:
+            found = polygon.locate(c)
+            if found is Location.INSIDE:
+                return found
+            if found is Location.BOUNDARY:
+                result = found
+        return result
+
+    def contains(self, point: CoordinateLike, boundary: bool = True) -> bool:
+        """True when any member polygon contains the point."""
+        location = self.locate(point)
+        if location is Location.BOUNDARY:
+            return boundary
+        return location is Location.INSIDE
+
+    def area(self) -> float:
+        """Sum of the member areas in square metres (overlaps count twice)."""
+        return sum(polygon.area() for polygon in self._polygons)
+
+    def perimeter(self) -> float:
+        return sum(polygon.perimeter() for polygon in self._polygons)
+
+    def centroid(self) -> Coordinate:
+        """Area-weighted centroid of the members in lon/lat space."""
+        x, y, _ = _combine_centroids([polygon._planar_centroid() for polygon in self._polygons])
+        return Coordinate(y, _wrap_lon(x))
+
+    def normalized(self) -> "MultiPolygon":
+        return MultiPolygon(polygon.normalized() for polygon in self._polygons)
