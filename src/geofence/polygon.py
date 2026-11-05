@@ -293,6 +293,15 @@ class Ring:
             return boundary
         return location is Location.INSIDE
 
+    def boundary_distance(self, point: CoordinateLike) -> float:
+        """Distance in metres from a point to the nearest edge of the ring.
+
+        Each edge is measured as a great-circle arc, which matches the lon/lat
+        edge model closely for edges up to a few kilometres long.
+        """
+        c = as_coordinate(point)
+        return min(geodesy.distance_to_segment(c, a, b) for a, b in self.edges())
+
 
 def _align_turn(x: float, reference: float) -> float:
     """Shift ``x`` by whole turns so that it lies within 180 degrees of ``reference``."""
@@ -380,6 +389,11 @@ class Polygon:
         if location is Location.BOUNDARY:
             return boundary
         return location is Location.INSIDE
+
+    def boundary_distance(self, point: CoordinateLike) -> float:
+        """Distance in metres to the nearest edge of the exterior or of a hole."""
+        c = as_coordinate(point)
+        return min(ring.boundary_distance(c) for ring in self.rings)
 
     def area(self) -> float:
         """Area on the sphere in square metres, holes subtracted."""
@@ -473,6 +487,11 @@ class MultiPolygon:
         if location is Location.BOUNDARY:
             return boundary
         return location is Location.INSIDE
+
+    def boundary_distance(self, point: CoordinateLike) -> float:
+        """Distance in metres to the nearest edge of any member polygon."""
+        c = as_coordinate(point)
+        return min(polygon.boundary_distance(c) for polygon in self._polygons)
 
     def area(self) -> float:
         """Sum of the member areas in square metres (overlaps count twice)."""
