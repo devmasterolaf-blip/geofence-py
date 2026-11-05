@@ -4,12 +4,14 @@ Angles going in and out are degrees, distances are metres.  Bearings are
 compass bearings: ``0`` is north, ``90`` east, always in ``[0, 360)``.
 
 The spherical functions use the mean Earth radius and are accurate to about
-0.3 % of the distance.
+0.3 % of the distance.  :func:`vincenty_inverse` works on the WGS-84
+ellipsoid and is accurate to well under a millimetre where it converges.
 """
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 from .coords import (
     EARTH_RADIUS_M,
@@ -18,7 +20,14 @@ from .coords import (
     as_coordinate,
     normalize_lon,
 )
-from .errors import ValidationError
+from .errors import ConvergenceError, ValidationError
+
+#: WGS-84 semi-major axis in metres and flattening.
+WGS84_A = 6378137.0
+WGS84_F = 1.0 / 298.257223563
+WGS84_B = WGS84_A * (1.0 - WGS84_F)
+
+DISTANCE_METHODS = ("haversine", "vincenty", "auto")
 
 
 def _radians(point: CoordinateLike) -> tuple[float, float]:
@@ -209,3 +218,127 @@ def distance_to_segment(
     if along >= segment:
         return radius * angular_distance(point, end)
     return abs(cross_track_distance(point, start, end, radius))
+
+
+@dataclass(frozen=True, slots=True)
+class GeodesicResult:
+    """Solution of the inverse geodesic problem on the ellipsoid."""
+
+    distance_m: float
+    initial_bearing: float
+    final_bearing: float
+    iterations: int
+
+
+def vincenty_inverse(
+    a: CoordinateLike,
+    b: CoordinateLike,
+    max_iterations: int = 200,
+    tolerance: float = 1e-12,
+) -> GeodesicResult:
+    """Distance and bearings between two points on the WGS-84 ellipsoid.
+
+    Uses Vincenty's inverse formula.  The iteration does not converge for
+    nearly antipodal points; in that case :class:`ConvergenceError` is raised
+    after ``max_iterations`` rounds.  :func:`distance` with ``method="auto"``
+    falls back to the spherical formula instead of raising.
+    """
+    if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) or max_iterations < 1:
+        raise ValidationError(f"max_iterations must be a positive integer, got {max_iterations!r}")
+    tolerance = _check_finite("tolerance", tolerance)
+    if tolerance <= 0:
+        raise ValidationError(f"tolerance must be positive, got {tolerance!r}")
+    lat1, lon1 = _radians(a)
+    lat2, lon2 = _radians(b)
+    f = WGS84_F
+    big_l = math.radians(normalize_lon(math.degrees(lon2 - lon1)))
+    u1 = math.atan((1.0 - f) * math.tan(lat1))
+    u2 = math.atan((1.0 - f) * math.tan(lat2))
+    sin_u1, cos_u1 = math.sin(u1), math.cos(u1)
+    sin_u2, cos_u2 = math.sin(u2), math.cos(u2)
+
+    lam = big_l
+    for iteration in range(1, max_iterations + 1):
+        sin_lam, cos_lam = math.sin(lam), math.cos(lam)
+        sin_sigma = math.hypot(
+            cos_u2 * sin_lam, cos_u1 * sin_u2 - sin_u1 * cos_u2 * cos_lam
+        )
+        if sin_sigma == 0.0:
+            # Coincident points (or exactly antipodal on the equator, which
+            # the formula cannot tell apart; treat as non-convergent below).
+            if abs(big_l) < 1e-12 and abs(lat1 - lat2) < 1e-12:
+                return GeodesicResult(0.0, 0.0, 0.0, iteration)
+            break
+        cos_sigma = sin_u1 * sin_u2 + cos_u1 * cos_u2 * cos_lam
+        sigma = math.atan2(sin_sigma, cos_sigma)
+        sin_alpha = cos_u1 * cos_u2 * sin_lam / sin_sigma
+        cos_sq_alpha = 1.0 - sin_alpha * sin_alpha
+        # cos_sq_alpha is zero only along the equator, where the term vanishes.
+        cos_2sigma_m = (
+            cos_sigma - 2.0 * sin_u1 * sin_u2 / cos_sq_alpha if cos_sq_alpha > 1e-15 else 0.0
+        )
+        c = f / 16.0 * cos_sq_alpha * (4.0 + f * (4.0 - 3.0 * cos_sq_alpha))
+        previous = lam
+        lam = big_l + (1.0 - c) * f * sin_alpha * (
+            sigma
+            + c * sin_sigma * (cos_2sigma_m + c * cos_sigma * (-1.0 + 2.0 * cos_2sigma_m**2))
+        )
+        if abs(lam) > math.pi:
+            break
+        if abs(lam - previous) < tolerance:
+            u_sq = cos_sq_alpha * (WGS84_A**2 - WGS84_B**2) / WGS84_B**2
+            big_a = 1.0 + u_sq / 16384.0 * (4096.0 + u_sq * (-768.0 + u_sq * (320.0 - 175.0 * u_sq)))
+            big_b = u_sq / 1024.0 * (256.0 + u_sq * (-128.0 + u_sq * (74.0 - 47.0 * u_sq)))
+            delta_sigma = big_b * sin_sigma * (
+                cos_2sigma_m
+                + big_b
+                / 4.0
+                * (
+                    cos_sigma * (-1.0 + 2.0 * cos_2sigma_m**2)
+                    - big_b
+                    / 6.0
+                    * cos_2sigma_m
+                    * (-3.0 + 4.0 * sin_sigma**2)
+                    * (-3.0 + 4.0 * cos_2sigma_m**2)
+                )
+            )
+            sin_lam, cos_lam = math.sin(lam), math.cos(lam)
+            alpha1 = math.atan2(cos_u2 * sin_lam, cos_u1 * sin_u2 - sin_u1 * cos_u2 * cos_lam)
+            alpha2 = math.atan2(cos_u1 * sin_lam, -sin_u1 * cos_u2 + cos_u1 * sin_u2 * cos_lam)
+            return GeodesicResult(
+                distance_m=WGS84_B * big_a * (sigma - delta_sigma),
+                initial_bearing=math.degrees(alpha1) % 360.0,
+                final_bearing=math.degrees(alpha2) % 360.0,
+                iterations=iteration,
+            )
+    raise ConvergenceError(
+        "Vincenty inverse did not converge (the points are nearly antipodal)",
+        iterations=iteration,
+    )
+
+
+def vincenty_distance(a: CoordinateLike, b: CoordinateLike) -> float:
+    """Ellipsoidal distance in metres; raises :class:`ConvergenceError` near antipodes."""
+    return vincenty_inverse(a, b).distance_m
+
+
+def distance(a: CoordinateLike, b: CoordinateLike, method: str = "auto") -> float:
+    """Distance in metres using the named method.
+
+    ``"haversine"`` is the spherical great-circle distance, ``"vincenty"`` the
+    WGS-84 ellipsoidal distance (may raise :class:`ConvergenceError`), and
+    ``"auto"`` tries Vincenty first and falls back to haversine when the
+    iteration does not converge.
+    """
+    if method == "haversine":
+        return haversine_distance(a, b)
+    if method == "vincenty":
+        return vincenty_distance(a, b)
+    if method == "auto":
+        try:
+            return vincenty_distance(a, b)
+        except ConvergenceError:
+            return haversine_distance(a, b)
+    raise ValidationError(
+        f"unknown distance method {method!r} (expected one of: {', '.join(DISTANCE_METHODS)})"
+    )

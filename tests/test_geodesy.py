@@ -187,3 +187,75 @@ class TestTrackDistances:
 
     def test_distance_to_zero_length_segment(self):
         assert geodesy.distance_to_segment((1, 0), (0, 0), (0, 0)) == pytest.approx(self.ONE_DEG)
+
+
+class TestVincenty:
+    # Geoscience Australia worked example: Flinders Peak to Buninyong.
+    FLINDERS = Coordinate(-(37 + 57 / 60 + 3.72030 / 3600), 144 + 25 / 60 + 29.52440 / 3600)
+    BUNINYONG = Coordinate(-(37 + 39 / 60 + 10.15610 / 3600), 143 + 55 / 60 + 35.38390 / 3600)
+
+    def test_reference_line(self):
+        result = geodesy.vincenty_inverse(self.FLINDERS, self.BUNINYONG)
+        assert result.distance_m == pytest.approx(54972.271, abs=1e-3)
+        assert result.initial_bearing == pytest.approx(306 + 52 / 60 + 5.37 / 3600, abs=1e-5)
+        assert result.final_bearing == pytest.approx(307 + 10 / 60 + 25.07 / 3600, abs=1e-5)
+        assert 1 <= result.iterations < 20
+
+    def test_one_degree_of_equator(self):
+        expected = geodesy.WGS84_A * math.radians(1.0)
+        assert geodesy.vincenty_distance((0, 0), (0, 1)) == pytest.approx(expected, abs=1e-6)
+
+    def test_meridian_quadrant(self):
+        assert geodesy.vincenty_distance((0, 0), (90, 0)) == pytest.approx(10_001_965.729, abs=1e-2)
+
+    def test_coincident_points(self):
+        result = geodesy.vincenty_inverse(PARIS, PARIS)
+        assert result.distance_m == 0.0
+        assert result.initial_bearing == 0.0
+
+    def test_symmetric_distance(self):
+        there = geodesy.vincenty_distance(PARIS, NEW_YORK)
+        back = geodesy.vincenty_distance(NEW_YORK, PARIS)
+        assert there == pytest.approx(back, abs=1e-6)
+
+    def test_differs_from_sphere_by_less_than_half_a_percent(self):
+        sphere = geodesy.haversine_distance(PARIS, NEW_YORK)
+        ellipsoid = geodesy.vincenty_distance(PARIS, NEW_YORK)
+        assert ellipsoid != pytest.approx(sphere, abs=100)
+        assert ellipsoid == pytest.approx(sphere, rel=5e-3)
+
+    def test_takes_short_way_over_antimeridian(self):
+        d = geodesy.vincenty_distance((0, 179.5), (0, -179.5))
+        assert d == pytest.approx(geodesy.WGS84_A * math.radians(1.0), abs=1e-6)
+
+    def test_near_antipodal_points_raise_convergence_error(self):
+        with pytest.raises(geodesy.ConvergenceError) as info:
+            geodesy.vincenty_inverse((0, 0), (0.5, 179.7))
+        assert info.value.iterations >= 1
+
+    def test_iteration_cap_is_respected(self):
+        with pytest.raises(geodesy.ConvergenceError) as info:
+            geodesy.vincenty_inverse(PARIS, NEW_YORK, max_iterations=1)
+        assert info.value.iterations == 1
+
+    @pytest.mark.parametrize("kwargs", [{"max_iterations": 0}, {"max_iterations": 2.5}, {"tolerance": 0}])
+    def test_bad_iteration_settings_rejected(self, kwargs):
+        with pytest.raises(ValidationError):
+            geodesy.vincenty_inverse(PARIS, LONDON, **kwargs)
+
+
+class TestDistanceDispatch:
+    def test_methods(self):
+        assert geodesy.distance(PARIS, LONDON, "haversine") == geodesy.haversine_distance(PARIS, LONDON)
+        assert geodesy.distance(PARIS, LONDON, "vincenty") == geodesy.vincenty_distance(PARIS, LONDON)
+        assert geodesy.distance(PARIS, LONDON) == geodesy.vincenty_distance(PARIS, LONDON)
+
+    def test_auto_falls_back_to_haversine_near_antipodes(self):
+        a, b = (0, 0), (0.5, 179.7)
+        assert geodesy.distance(a, b, "auto") == geodesy.haversine_distance(a, b)
+        with pytest.raises(geodesy.ConvergenceError):
+            geodesy.distance(a, b, "vincenty")
+
+    def test_unknown_method(self):
+        with pytest.raises(ValidationError, match="unknown distance method"):
+            geodesy.distance(PARIS, LONDON, "manhattan")
