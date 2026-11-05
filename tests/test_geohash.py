@@ -151,10 +151,10 @@ class TestCovering:
         assert geohash.covering(BoundingBox.world(), 1) == sorted(geohash.BASE32)
 
     def test_limit(self):
-        box = BoundingBox(0, 0, 10, 10)
+        box = BoundingBox(0, 0, 1, 1)
         with pytest.raises(GeohashError, match="max_cells"):
             geohash.covering(box, 6)
-        assert len(geohash.covering(box, 6, max_cells=2_000_000)) > 4096
+        assert len(geohash.covering(box, 6, max_cells=50_000)) > 4096
         with pytest.raises(GeohashError):
             geohash.covering(box, 3, max_cells=0)
 
