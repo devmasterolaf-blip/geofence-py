@@ -132,6 +132,14 @@ class Ring:
         """Vertices with the first one repeated at the end."""
         return [*self._coords, self._coords[0]]
 
+    def planar_vertices(self) -> list[tuple[float, float]]:
+        """Vertices as ``(x, y)`` with continuous (unwrapped) longitudes as x.
+
+        For a ring that crosses the antimeridian some x values lie outside
+        ``[-180, 180]``.
+        """
+        return list(zip(self._xs, self._ys))
+
     def __len__(self) -> int:
         return len(self._coords)
 
