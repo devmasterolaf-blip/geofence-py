@@ -104,3 +104,29 @@ class TestSimplify:
     def test_bad_tolerance_rejected(self, tolerance):
         with pytest.raises(ValidationError):
             polyline.simplify([(0, 0), (1, 1), (2, 2)], tolerance)
+
+
+class TestLineString:
+    def test_basics(self):
+        line = polyline.LineString([(0, 0), (0, 1), (1, 1)])
+        assert len(line) == 3
+        assert line.coords[0] == Coordinate(0, 0)
+        assert line == polyline.LineString([Coordinate(0, 0), (0, 1), (1, 1)])
+        assert hash(line) == hash(polyline.LineString([(0, 0), (0, 1), (1, 1)]))
+        assert repr(line) == "LineString([(0.0, 0.0), (0.0, 1.0), (1.0, 1.0)])"
+
+    def test_needs_two_points(self):
+        with pytest.raises(InvalidGeometryError):
+            polyline.LineString([(0, 0)])
+
+    def test_delegates_to_module_functions(self):
+        points = [(0, 0), (0.0001, 1), (0, 2)]
+        line = polyline.LineString(points)
+        assert line.length() == pytest.approx(polyline.length(points))
+        assert line.simplify(50) == polyline.LineString([(0, 0), (0, 2)])
+        assert line.point_at_distance(0) == Coordinate(0, 0)
+        assert (line.bbox.west, line.bbox.east) == (0, 2)
+
+    def test_bbox_of_line_over_antimeridian(self):
+        line = polyline.LineString([(0, 179), (1, -179)])
+        assert line.bbox.crosses_antimeridian

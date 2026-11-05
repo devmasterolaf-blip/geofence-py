@@ -1,4 +1,4 @@
-"""Polyline helpers: length, position along the line and simplification."""
+"""Polylines: length, position along the line, simplification and a LineString type."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import math
 from typing import Iterable
 
 from . import geodesy
+from .bbox import BoundingBox
 from .coords import Coordinate, CoordinateLike, as_coordinates
 from .errors import InvalidGeometryError, ValidationError
 
@@ -103,3 +104,52 @@ def simplify(points: Iterable[CoordinateLike], tolerance_m: float) -> list[Coord
             stack.append((first, worst_index))
             stack.append((worst_index, last))
     return [coord for coord, kept in zip(coords, keep) if kept]
+
+
+class LineString:
+    """An ordered path of at least two points.
+
+    A thin immutable wrapper around the module-level functions, used as the
+    in-memory form of WKT ``LINESTRING`` and GeoJSON ``LineString``.
+    """
+
+    __slots__ = ("_coords",)
+
+    def __init__(self, points: Iterable[CoordinateLike]) -> None:
+        coords = as_coordinates(points)
+        if len(coords) < 2:
+            raise InvalidGeometryError(
+                f"a line string needs at least 2 points, got {len(coords)}"
+            )
+        self._coords: tuple[Coordinate, ...] = tuple(coords)
+
+    @property
+    def coords(self) -> tuple[Coordinate, ...]:
+        return self._coords
+
+    def __len__(self) -> int:
+        return len(self._coords)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, LineString) and self._coords == other._coords
+
+    def __hash__(self) -> int:
+        return hash(self._coords)
+
+    def __repr__(self) -> str:
+        return f"LineString({[c.as_tuple() for c in self._coords]!r})"
+
+    @property
+    def bbox(self) -> BoundingBox:
+        return BoundingBox.from_points(self._coords)
+
+    def length(self, method: str = "haversine") -> float:
+        """Length in metres."""
+        return length(self._coords, method)
+
+    def point_at_distance(self, distance_m: float) -> Coordinate:
+        return point_at_distance(self._coords, distance_m)
+
+    def simplify(self, tolerance_m: float) -> "LineString":
+        """Douglas-Peucker simplified copy (always keeps both end points)."""
+        return LineString(simplify(self._coords, tolerance_m))
